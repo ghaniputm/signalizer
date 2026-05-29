@@ -1,9 +1,11 @@
+import { useMemo, useState } from 'react';
 import type { GetStaticProps, NextPage } from 'next';
 
 interface SignalRecord {
   id: string;
   created_at: string;
   signal_type: 'BUY' | 'SELL';
+  timeframe: 'H4' | 'M15';
   status: 'PENDING_C1' | 'COMPLETED';
   c0_timestamp: string;
   c0_open: number;
@@ -56,28 +58,35 @@ function formatPct(v: number | string | null): string {
 }
 
 const Dashboard: NextPage<DashboardProps> = ({ signals, count }) => {
+  const [selectedTimeframe, setSelectedTimeframe] = useState<'ALL' | 'H4' | 'M15'>('ALL');
+
+  const filteredSignals = useMemo(() => {
+    if (selectedTimeframe === 'ALL') return signals;
+    return signals.filter((s) => s.timeframe === selectedTimeframe);
+  }, [signals, selectedTimeframe]);
+
   return (
     <div style={styles.page}>
       {/* Header */}
       <header style={styles.header}>
         <div>
-          <h1 style={styles.title}>📊 XAUUSD H4 Dashboard</h1>
+          <h1 style={styles.title}>📊 XAUUSD Multi-Timeframe Dashboard</h1>
           <p style={styles.subtitle}>Trend Reversal & Rebound Monitor</p>
         </div>
         <div style={styles.stats}>
           <div style={styles.statBox}>
-            <span style={styles.statValue}>{count}</span>
+            <span style={styles.statValue}>{filteredSignals.length}</span>
             <span style={styles.statLabel}>Total Sinyal</span>
           </div>
           <div style={styles.statBox}>
             <span style={styles.statValue}>
-              {signals.filter((s) => s.status === 'PENDING_C1').length}
+              {filteredSignals.filter((s) => s.status === 'PENDING_C1').length}
             </span>
             <span style={styles.statLabel}>Pending</span>
           </div>
           <div style={styles.statBox}>
             <span style={styles.statValue}>
-              {signals.filter((s) => s.status === 'COMPLETED').length}
+              {filteredSignals.filter((s) => s.status === 'COMPLETED').length}
             </span>
             <span style={styles.statLabel}>Completed</span>
           </div>
@@ -86,13 +95,29 @@ const Dashboard: NextPage<DashboardProps> = ({ signals, count }) => {
 
       {/* Info Box */}
       <div style={styles.infoBox}>
-        <p>🔄 Endpoint <code>/api/check-signals</code> dipanggil otomatis via Vercel Cron setiap <strong>4 jam</strong>.</p>
+        <p>🔄 Endpoint <code>/api/check-signals</code> memproses <strong>H4 dan M15</strong> dalam satu trigger.</p>
         <p>📨 Sinyal baru dikirim ke <strong>Telegram</strong> saat perubahan warna candle terdeteksi.</p>
         <p>📈 Rebound dihitung dari Candle +1 setelah Candle 0 terkunci.</p>
       </div>
 
+      <div style={styles.filterRow}>
+        {(['ALL', 'H4', 'M15'] as const).map((tf) => (
+          <button
+            key={tf}
+            type="button"
+            onClick={() => setSelectedTimeframe(tf)}
+            style={{
+              ...styles.filterButton,
+              ...(selectedTimeframe === tf ? styles.filterButtonActive : {}),
+            }}
+          >
+            {tf}
+          </button>
+        ))}
+      </div>
+
       {/* Table */}
-      {signals.length === 0 ? (
+      {filteredSignals.length === 0 ? (
         <div style={styles.empty}>
           <p>Belum ada data sinyal.</p>
           <p style={styles.emptyHint}>
@@ -106,6 +131,7 @@ const Dashboard: NextPage<DashboardProps> = ({ signals, count }) => {
             <thead>
               <tr style={styles.theadRow}>
                 <th style={styles.th}>Waktu (WIB)</th>
+                <th style={styles.th}>Timeframe</th>
                 <th style={styles.th}>Sinyal</th>
                 <th style={styles.th}>Status</th>
                 <th style={styles.th}>C0 Open</th>
@@ -118,13 +144,23 @@ const Dashboard: NextPage<DashboardProps> = ({ signals, count }) => {
               </tr>
             </thead>
             <tbody>
-              {signals.map((sig) => {
+              {filteredSignals.map((sig) => {
                 const sigColor = SIGNAL_COLORS[sig.signal_type] ?? '#888';
                 const statusColor = STATUS_COLORS[sig.status] ?? '#888';
                 return (
                   <tr key={sig.id} style={styles.tr}>
                     <td style={{ ...styles.td, fontSize: '12px' }}>
                       {formatWIB(sig.c0_timestamp)}
+                    </td>
+                    <td style={styles.td}>
+                      <span
+                        style={{
+                          ...styles.badge,
+                          background: sig.timeframe === 'H4' ? '#3b82f6' : '#8b5cf6',
+                        }}
+                      >
+                        {sig.timeframe}
+                      </span>
                     </td>
                     <td style={styles.td}>
                       <span style={{ ...styles.badge, background: sigColor }}>
@@ -155,7 +191,7 @@ const Dashboard: NextPage<DashboardProps> = ({ signals, count }) => {
 
       {/* Footer */}
       <footer style={styles.footer}>
-        <p>XAUUSD H4 Signal Monitor • Powered by Vercel + Supabase + TwelveData + Telegram</p>
+        <p>XAUUSD Multi-Timeframe Signal Monitor • Powered by Vercel + Supabase + TwelveData + Telegram</p>
       </footer>
     </div>
   );
@@ -177,7 +213,7 @@ export const getStaticProps: GetStaticProps<DashboardProps> = async () => {
       .from('signal_history')
       .select('*')
       .order('c0_timestamp', { ascending: false })
-      .limit(100);
+      .limit(200);
 
     return {
       props: {

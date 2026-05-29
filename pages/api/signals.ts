@@ -12,15 +12,28 @@ export default async function handler(
   try {
     const supabase = getSupabaseClient();
 
-    const { data, error } = await supabase
+    const timeframeRaw = req.query.timeframe;
+    const timeframe =
+      typeof timeframeRaw === 'string' && ['H4', 'M15'].includes(timeframeRaw)
+        ? timeframeRaw
+        : null;
+
+    let query = supabase
       .from('signal_history')
       .select('*')
       .order('c0_timestamp', { ascending: false })
       .limit(100);
 
+    if (timeframe) {
+      query = query.eq('timeframe', timeframe);
+    }
+
+    const { data, error } = await query;
+
     if (error) throw error;
 
     res.status(200).json({
+      timeframe: timeframe ?? 'ALL',
       signals: data ?? [],
       count: data?.length ?? 0,
     });

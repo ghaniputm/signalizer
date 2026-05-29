@@ -1,7 +1,6 @@
 import type { NextApiRequest, NextApiResponse } from 'next';
 import { getSupabaseClient } from '../../lib/supabaseClient';
 
-// ─── Types ───────────────────────────────────────────────────────────────
 interface Candle {
   timestamp: string;
   open: number;
@@ -18,7 +17,13 @@ interface TwelveDataCandle {
   close: string;
 }
 
-// ─── Helpers ─────────────────────────────────────────────────────────────
+type Timeframe = 'H4' | 'M15';
+
+const TIMEFRAME_INTERVAL: Record<Timeframe, string> = {
+  H4: '4h',
+  M15: '15min',
+};
+
 function parseCandle(raw: TwelveDataCandle): Candle {
   return {
     timestamp: raw.datetime,
@@ -49,16 +54,16 @@ function formatWIB(iso: string): string {
   });
 }
 
-// ─── TwelveData Fetcher ──────────────────────────────────────────────────
-async function fetchLastTwoCandles(): Promise<Candle[]> {
+async function fetchLastTwoCandles(timeframe: Timeframe): Promise<Candle[]> {
   const apiKey = process.env.TWELVEDATA_API_KEY;
   if (!apiKey) throw new Error('Missing TWELVEDATA_API_KEY');
 
   const candidates = ['XAU/USD', 'XAUUSD'];
   let lastError = '';
+  const interval = TIMEFRAME_INTERVAL[timeframe];
 
   for (const symbol of candidates) {
-    const url = `https://api.twelvedata.com/time_series?symbol=${encodeURIComponent(symbol)}&interval=4h&outputsize=3&apikey=${apiKey}`;
+    const url = `https://api.twelvedata.com/time_series?symbol=${encodeURIComponent(symbol)}&interval=${interval}&outputsize=3&apikey=${apiKey}`;
     const res = await fetch(url);
 
     if (!res.ok) {
@@ -79,15 +84,13 @@ async function fetchLastTwoCandles(): Promise<Candle[]> {
       continue;
     }
 
-    // TwelveData returns newest first → reverse to chronological
     return values.reverse().map(parseCandle);
   }
 
-  throw new Error(`TwelveData fetch failed: ${lastError}`);
+  throw new Error(`TwelveData fetch failed (${timeframe}): ${lastError}`);
 }
 
-// ─── Telegram Notifier ───────────────────────────────────────────────────
-async function sendTelegramAlert(signalType: 'BUY' | 'SELL', c0: Candle): Promise<void> {
+async function sendTelegramAlert(signalType: 'BUY' | 'SELL', c0: Candle, timeframe: Timeframe): Promise<void> {
   const botToken = process.env.TELEGRAM_BOT_TOKEN;
   const chatId = process.env.TELEGRAM_CHAT_ID;
   if (!botToken || !chatId) {
@@ -96,11 +99,9 @@ async function sendTelegramAlert(signalType: 'BUY' | 'SELL', c0: Candle): Promis
   }
 
   const directionLabel =
-    signalType === 'BUY'
-      ? '🔴 ➡️ 🟢 (Merah → Hijau)'
-      : '🟢 ➡️ 🔴 (Hijau → Merah)';
+    signalType === 'BUY' ? '🔴 ➡️ 🟢 (Merah → Hijau)' : '🟢 ➡️ 🔴 (Hijau → Merah)';
 
-  const message = `<b>🚨 SIGNAL XAUUSD H4 - BERUBAH WARNA 🚨</b>
+  const message = `<b>🚨 SIGNAL XAUUSD ${timeframe} - BERUBAH WARNA 🚨</b>
 Jenis Sinyal: 🕯️ <b>${signalType} (${directionLabel})</b>
 Waktu Close: ${formatWIB(c0.timestamp)}
 📊 <b>DATA CANDLE 0 (Berubah Warna):</b>
@@ -108,7 +109,7 @@ Waktu Close: ${formatWIB(c0.timestamp)}
 • High : ${c0.high.toFixed(2)}
 • Low  : ${c0.low.toFixed(2)}
 • Close: ${c0.close.toFixed(2)}
-<i>ℹ️ Sistem mengunci data. Persentase rebound Candle +1 akan dihitung otomatis 4 jam dari sekarang.</i>`;
+<i>ℹ️ Sistem mengunci data. Persentase rebound Candle +1 akan dihitung otomatis pada timeframe yang sama.</i>`;
 
   const url = `https://api.telegram.org/bot${botToken}/sendMessage`;
   const payload = {
@@ -129,112 +130,107 @@ Waktu Close: ${formatWIB(c0.timestamp)}
   }
 }
 
-// ─── Main Handler ────────────────────────────────────────────────────────
-export default async function handler(
-  req: NextApiRequest,
-  res: NextApiResponse
-) {
+async function processTimeframe(timeframe: Timeframe) {
+  const supabase = getSupabaseClient();
+
+  const { data: pendingSignals, error: fetchError } = await supabase
+    .from('signal_history')
+    .select('*')
+    .eq('status', 'PENDING_C1')
+    .eq('timeframe', timeframe);
+
+  if (fetchError) throw fetchError;
+
+  if (pendingSignals && pendingSignals.length > 0) {
+    const candles = await fetchLastTwoCandles(timeframe);
+    const latestCandle = candles[candles.length - 1];
+
+    for (const signal of pendingSignals) {
+      const c0Close = parseFloat(signal.c0_close);
+      let reboundPct: number;
+
+      if (signal.signal_type === 'SELL') {
+        reboundPct = ((latestCandle.high - c0Close) / c0Close) * 100;
+      } else {
+        reboundPct = ((c0Close - latestCandle.low) / c0Close) * 100;
+      }
+
+      const { error: updateError } = await supabase
+        .from('signal_history')
+        .update({
+          status: 'COMPLETED',
+          c1_timestamp: latestCandle.timestamp,
+          c1_open: latestCandle.open,
+          c1_high: latestCandle.high,
+          c1_low: latestCandle.low,
+          c1_close: latestCandle.close,
+          c1_rebound_percentage: parseFloat(reboundPct.toFixed(4)),
+        })
+        .eq('id', signal.id);
+
+      if (updateError) {
+        console.error(`Failed to update signal ${signal.id}:`, updateError);
+      }
+    }
+  }
+
+  const candles = await fetchLastTwoCandles(timeframe);
+  const c2 = candles[candles.length - 2];
+  const c1 = candles[candles.length - 1];
+
+  let signalType: 'BUY' | 'SELL' | null = null;
+  if (isBearish(c2) && isBullish(c1)) {
+    signalType = 'BUY';
+  } else if (isBullish(c2) && isBearish(c1)) {
+    signalType = 'SELL';
+  }
+
+  if (signalType) {
+    const { error: insertError } = await supabase.from('signal_history').insert({
+      timeframe,
+      signal_type: signalType,
+      status: 'PENDING_C1',
+      c0_timestamp: c1.timestamp,
+      c0_open: c1.open,
+      c0_high: c1.high,
+      c0_low: c1.low,
+      c0_close: c1.close,
+    });
+
+    if (insertError) throw insertError;
+    await sendTelegramAlert(signalType, c1, timeframe);
+  }
+
+  return {
+    timeframe,
+    pendingUpdated: pendingSignals?.length ?? 0,
+    newSignal: signalType ?? 'none',
+  };
+}
+
+export default async function handler(req: NextApiRequest, res: NextApiResponse) {
   if (req.method !== 'GET') {
     return res.status(405).json({ message: 'Method not allowed' });
   }
 
   try {
-    const supabase = getSupabaseClient();
-
-    // ── Stage 1: Update pending signals (Candle +1) ──────────────────────
-    const { data: pendingSignals, error: fetchError } = await supabase
-      .from('signal_history')
-      .select('*')
-      .eq('status', 'PENDING_C1');
-
-    if (fetchError) throw fetchError;
-
-    if (pendingSignals && pendingSignals.length > 0) {
-      // Fetch the latest candle to act as Candle +1 for the oldest pending
-      const candles = await fetchLastTwoCandles();
-      const latestCandle = candles[candles.length - 1]; // most recent closed
-
-      for (const signal of pendingSignals) {
-        const c0Close = parseFloat(signal.c0_close);
-        let reboundPct: number;
-
-        if (signal.signal_type === 'SELL') {
-          // Rebound = (High_C+1 - Close_C0) / Close_C0 * 100
-          reboundPct =
-            ((latestCandle.high - c0Close) / c0Close) * 100;
-        } else {
-          // BUY: Rebound = (Close_C0 - Low_C+1) / Close_C0 * 100
-          reboundPct =
-            ((c0Close - latestCandle.low) / c0Close) * 100;
-        }
-
-        const { error: updateError } = await supabase
-          .from('signal_history')
-          .update({
-            status: 'COMPLETED',
-            c1_timestamp: latestCandle.timestamp,
-            c1_open: latestCandle.open,
-            c1_high: latestCandle.high,
-            c1_low: latestCandle.low,
-            c1_close: latestCandle.close,
-            c1_rebound_percentage: parseFloat(reboundPct.toFixed(4)),
-          })
-          .eq('id', signal.id);
-
-        if (updateError) {
-          console.error(`Failed to update signal ${signal.id}:`, updateError);
-        }
-      }
-    }
-
-    // ── Stage 2: Detect new signal ───────────────────────────────────────
-    const candles = await fetchLastTwoCandles();
-    const c2 = candles[candles.length - 2]; // Candle[-2]
-    const c1 = candles[candles.length - 1]; // Candle[-1] (latest closed)
-
-    let signalType: 'BUY' | 'SELL' | null = null;
-
-    // BUY: Candle[-2] red (bearish) → Candle[-1] green (bullish)
-    if (isBearish(c2) && isBullish(c1)) {
-      signalType = 'BUY';
-    }
-    // SELL: Candle[-2] green (bullish) → Candle[-1] red (bearish)
-    else if (isBullish(c2) && isBearish(c1)) {
-      signalType = 'SELL';
-    }
-
-    if (signalType) {
-      // Insert new signal record
-      const { error: insertError } = await supabase
-        .from('signal_history')
-        .insert({
-          signal_type: signalType,
-          status: 'PENDING_C1',
-          c0_timestamp: c1.timestamp,
-          c0_open: c1.open,
-          c0_high: c1.high,
-          c0_low: c1.low,
-          c0_close: c1.close,
-        });
-
-      if (insertError) throw insertError;
-
-      // Send Telegram notification
-      await sendTelegramAlert(signalType, c1);
+    const results = [];
+    for (const tf of ['H4', 'M15'] as Timeframe[]) {
+      const result = await processTimeframe(tf);
+      results.push(result);
     }
 
     res.status(200).json({
       message: 'Signals processed successfully',
-      pendingUpdated: pendingSignals?.length ?? 0,
-      newSignal: signalType ?? 'none',
+      results,
     });
   } catch (error: unknown) {
     const normalized =
       error instanceof Error
         ? { name: error.name, message: error.message, stack: error.stack }
         : typeof error === 'object' && error !== null
-        ? JSON.parse(JSON.stringify(error))
-        : { message: String(error) };
+          ? JSON.parse(JSON.stringify(error))
+          : { message: String(error) };
 
     console.error('check-signals error (detailed):', normalized);
 

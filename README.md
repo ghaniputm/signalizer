@@ -74,6 +74,24 @@ TELEGRAM_CHAT_ID=your_telegram_chat_id
 
 ## 5) Setup Database (Supabase SQL)
 
+### Migration untuk Multi-Timeframe (H4 + M15)
+
+Jika tabel `signal_history` sudah terlanjur dibuat sebelumnya, jalankan migration ini dulu:
+
+```sql
+ALTER TABLE public.signal_history
+ADD COLUMN IF NOT EXISTS timeframe VARCHAR(10) NOT NULL DEFAULT 'H4';
+
+CREATE INDEX IF NOT EXISTS idx_signal_history_timeframe
+ON public.signal_history(timeframe);
+
+CREATE INDEX IF NOT EXISTS idx_signal_history_timeframe_status
+ON public.signal_history(timeframe, status);
+```
+
+> Setelah migration, data lama otomatis dianggap `H4` (karena default).
+
+
 Buka **Supabase → SQL Editor**, jalankan:
 
 ```sql
