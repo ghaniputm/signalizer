@@ -47,6 +47,7 @@ coverage/
 
 node_modules
 .next
+.next_
 .env
 dist
 coverage
